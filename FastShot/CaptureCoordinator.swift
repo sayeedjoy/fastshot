@@ -140,6 +140,7 @@ import UniformTypeIdentifiers
             let image = try Renderer.render(source: view.source, crop: crop, items: view.history.items)
             if action == .ocr {
                 let token = session
+                view.showMessage("Recognising text…")
                 task = Task {
                     do {
                         let text = try await TextRecognition.recognize(image)
@@ -147,7 +148,9 @@ import UniformTypeIdentifiers
                         if text.isEmpty { view.showMessage("No text found. Try a larger or clearer selection."); busy = false; return }
                         let pasteboard = NSPasteboard.general; pasteboard.clearContents()
                         guard pasteboard.setString(text, forType: .string) else { throw FastShotError.message("Could not copy text to the clipboard.") }
+                        let lines = text.split(whereSeparator: \.isNewline).count
                         finish(restore: true); message = "Text copied."
+                        Toast.show(lines == 1 ? "Copied 1 line of text" : "Copied \(lines) lines of text", symbol: "text.viewfinder")
                     } catch { if session == token { busy = false; view.showMessage(error.localizedDescription) } }
                 }
                 return
@@ -157,21 +160,33 @@ import UniformTypeIdentifiers
                 let pb = NSPasteboard.general; pb.clearContents()
                 guard pb.setData(data, forType: .png) else { throw FastShotError.message("Could not copy the image. Try again.") }
                 finish(restore: true); message = "Screenshot copied."
+                Toast.show("Screenshot copied", symbol: "doc.on.clipboard")
                 return
             }
             let prefs = preferences.value
             var format = prefs.format
             var url: URL
             if action == .save {
-                let panel = NSSavePanel(); panel.level = .screenSaver
+                let panel = NSSavePanel()
+                panel.title = "Save Screenshot"; panel.prompt = "Save"
                 panel.allowedContentTypes = [format == "jpeg" ? .jpeg : .png]; panel.allowsOtherFileTypes = false; panel.canCreateDirectories = true
-                panel.directoryURL = try preferences.saveDirectory()
+                let directory = try preferences.saveDirectory()
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                panel.directoryURL = directory
                 let picker = SaveFormatPicker(frame: CGRect(x: 0, y: 0, width: 180, height: 28))
                 picker.panel = panel; picker.target = picker; picker.action = #selector(SaveFormatPicker.changed)
                 picker.addItems(withTitles: ["PNG", "JPEG"]); picker.selectItem(at: format == "jpeg" ? 1 : 0)
                 panel.accessoryView = picker
                 panel.nameFieldStringValue = try Filename.render(prefs.filenameTemplate, width: image.width, height: image.height) + (format == "jpeg" ? ".jpg" : ".png")
-                guard panel.runModal() == .OK, let destination = panel.url else { busy = false; return }
+                // The save panel is hosted out of process and ignores window levels, so it would open
+                // invisibly behind the screen-saver-level overlay. Step the overlay aside while it is up.
+                for window in overlays { window.orderOut(nil) }
+                NSApp.activate()
+                guard panel.runModal() == .OK, let destination = panel.url else {
+                    busy = false
+                    if let window = view.window, overlays.contains(where: { $0 === window }) { NSApp.activate(); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(view) }
+                    return
+                }
                 format = picker.indexOfSelectedItem == 1 ? "jpeg" : "png"
                 url = destination
             } else {
@@ -180,12 +195,18 @@ import UniformTypeIdentifiers
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let data = try Renderer.encode(image, format: format, quality: prefs.jpegQuality)
                 let saved = try OutputFiles.quickSave(data, directory: directory, template: prefs.filenameTemplate, width: image.width, height: image.height, format: format)
-                finish(restore: true); message = "Saved to \(saved.path)"; return
+                finish(restore: true); message = "Saved to \(saved.path)"
+                Toast.show("Saved \(saved.lastPathComponent)", symbol: "checkmark.circle"); return
             }
             let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
             try Renderer.encode(image, format: format, quality: prefs.jpegQuality).write(to: url, options: .atomic)
             finish(restore: true); message = "Saved to \(url.path)"
-        } catch { busy = false; view.showMessage(error.localizedDescription) }
+            Toast.show("Saved \(url.lastPathComponent)", symbol: "checkmark.circle")
+        } catch {
+            busy = false
+            if let window = view.window, !window.isVisible, overlays.contains(where: { $0 === window }) { NSApp.activate(); window.makeKeyAndOrderFront(nil) }
+            view.showMessage(error.localizedDescription)
+        }
     }
 }
 
@@ -196,13 +217,18 @@ nonisolated struct WindowRegion { let rect: CGRect }
 nonisolated enum TextRecognition {
     @concurrent static func recognize(_ image: CGImage) async throws -> String {
         try Task.checkCancellation()
-        let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate
-        try VNImageRequestHandler(cgImage: image).perform([request])
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate; request.usesLanguageCorrection = true; request.automaticallyDetectsLanguage = true
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
         try Task.checkCancellation()
-        return (request.results ?? []).sorted { a, b in
-            if abs(a.boundingBox.midY - b.boundingBox.midY) > 0.02 { return a.boundingBox.midY > b.boundingBox.midY }
-            return a.boundingBox.minX < b.boundingBox.minX
-        }.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        let words = (request.results ?? []).compactMap { o in o.topCandidates(1).first.map { (box: o.boundingBox, text: $0.string) } }
+        // Group observations that share a baseline into one line, top to bottom (Vision's origin is bottom-left).
+        var lines: [[(box: CGRect, text: String)]] = []
+        for word in words.sorted(by: { $0.box.midY > $1.box.midY }) {
+            if let anchor = lines.last?.first, abs(anchor.box.midY - word.box.midY) < min(anchor.box.height, word.box.height) / 2 { lines[lines.count - 1].append(word) }
+            else { lines.append([word]) }
+        }
+        return lines.map { $0.sorted { $0.box.minX < $1.box.minX }.map(\.text).joined(separator: " ") }.joined(separator: "\n")
     }
 }
 final class SaveFormatPicker: NSPopUpButton {

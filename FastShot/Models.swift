@@ -5,7 +5,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Identifiable {
     case region, window, display
     var id: Self { self }
     var title: String { rawValue.capitalized }
-    var symbol: String { switch self { case .region: "rectangle.dashed"; case .window: "macwindow"; case .display: "display" } }
+    var symbol: String { switch self { case .region: "rectangle.dashed"; case .window: "macwindow"; case .display: "menubar.dock.rectangle" } }
 }
 
 nonisolated enum Tool: String, CaseIterable, Identifiable {
@@ -25,9 +25,9 @@ nonisolated enum Tool: String, CaseIterable, Identifiable {
     }
     var symbol: String {
         switch self {
-        case .select: "cursorarrow"; case .pen: "pencil.tip"; case .line: "line.diagonal"; case .arrow: "arrow.up.right"
-        case .rect: "rectangle"; case .ellipse: "circle"; case .highlight: "highlighter"; case .text: "textformat"
-        case .step: "list.number"; case .redact: "checkmark.shield"; case .blur: "drop.halffull"; case .pixelate: "square.grid.3x3"
+        case .select: "cursorarrow"; case .pen: "scribble.variable"; case .line: "line.diagonal"; case .arrow: "arrow.up.right"
+        case .rect: "square"; case .ellipse: "circle"; case .highlight: "highlighter"; case .text: "character.textbox"
+        case .step: "1.circle"; case .redact: "eye.slash"; case .blur: "aqi.medium"; case .pixelate: "squareshape.split.3x3"
         }
     }
 }

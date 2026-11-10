@@ -27,7 +27,8 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     private var draft: Annotation?
     private var moving: Annotation?
     private var originalSelection: CGRect?
-    private var resizeCorner: Int?
+    private var resizeHandle: Int?
+    private var hoverLabel = NSTextField(labelWithString: "")
     private var selecting = false
     private var hoveredWindow: CGRect?
     private var preview: CGImage?
@@ -35,10 +36,19 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     private var modeBar = NSStackView()
     private var toolBar = NSStackView()
     private var actionBar = NSStackView()
-    private var styleBar = NSStackView()
-    private var toolButtons: [Tool: NSButton] = [:]
+    /// Related tools share one button; the button shows the variant last used in its group.
+    private static let toolGroups: [(title: String, tools: [Tool])] = [
+        ("Select", [.select]), ("Draw", [.pen, .highlight]), ("Lines", [.line, .arrow]), ("Shapes", [.rect, .ellipse]),
+        ("Text", [.text]), ("Step", [.step]), ("Redact", [.redact]), ("Blur & mosaic", [.blur, .pixelate]),
+    ]
+    private var groupButtons: [ToolButton] = []
+    private lazy var groupVariant = Self.toolGroups.map { $0.tools[0] }
     private var undoButton: NSButton!
     private var redoButton: NSButton!
+    private var styleButton: NSButton!
+    private lazy var stylePopover = makeStylePopover()
+    private let colorWell = NSColorWell()
+    private var styleSliders: [NSSlider] = []
     private var status = NSTextField(labelWithString: "")
     private var textField: NSTextField?
     private var textPoint = CGPoint.zero
@@ -68,18 +78,30 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited], owner: self))
     }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: tool == .select && selection != nil ? .arrow : .crosshair) }
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: tool == .select && selection != nil ? .arrow : .crosshair)
+        guard tool == .select, let selection, history.items.isEmpty else { return }
+        let grip: CGFloat = 6
+        addCursorRect(CGRect(x: selection.minX + grip, y: selection.minY - grip, width: max(0, selection.width - grip * 2), height: grip * 2), cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: selection.minX + grip, y: selection.maxY - grip, width: max(0, selection.width - grip * 2), height: grip * 2), cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: selection.minX - grip, y: selection.minY + grip, width: grip * 2, height: max(0, selection.height - grip * 2)), cursor: .resizeLeftRight)
+        addCursorRect(CGRect(x: selection.maxX - grip, y: selection.minY + grip, width: grip * 2, height: max(0, selection.height - grip * 2)), cursor: .resizeLeftRight)
+        for p in corners(selection) { addCursorRect(CGRect(x: p.x - 8, y: p.y - 8, width: 16, height: 16), cursor: .crosshair) }
+    }
     private func button(_ label: String, symbol: String, action: Selector) -> NSButton {
-        let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), target: self, action: action)
+        let b = ToolButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), target: self, action: action)
         b.bezelStyle = .inline; b.isBordered = false; b.toolTip = label; b.setAccessibilityLabel(label)
-        b.widthAnchor.constraint(equalToConstant: 30).isActive = true; b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        b.symbolConfiguration = .init(pointSize: 16, weight: .medium); b.imageScaling = .scaleNone
+        b.wantsLayer = true; b.layer?.cornerRadius = 7; b.layer?.cornerCurve = .continuous
+        b.hint = label; b.toolTip = nil; b.onHover = { [weak self] button, inside in self?.showHint(for: button, inside) }
+        b.widthAnchor.constraint(equalToConstant: 34).isActive = true; b.heightAnchor.constraint(equalToConstant: 32).isActive = true
         return b
     }
     private func panel(_ stack: NSStackView, vertical: Bool = false) {
-        stack.orientation = vertical ? .vertical : .horizontal; stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
-        stack.wantsLayer = true; stack.layer?.cornerRadius = 7; stack.layer?.borderWidth = 1
-        stack.layer?.borderColor = NSColor.gray.cgColor; stack.layer?.shadowOpacity = 0.22; stack.layer?.shadowRadius = 5
+        stack.orientation = vertical ? .vertical : .horizontal; stack.spacing = 3
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        stack.wantsLayer = true; stack.layer?.cornerRadius = 12; stack.layer?.cornerCurve = .continuous; stack.layer?.borderWidth = 0.5
+        stack.layer?.shadowOpacity = 0.3; stack.layer?.shadowRadius = 10; stack.layer?.shadowOffset = CGSize(width: 0, height: -3)
         addSubview(stack)
     }
     private func setupControls() {
@@ -90,50 +112,56 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             modeBar.addArrangedSubview(b)
         }
         panel(toolBar, vertical: true)
-        for (index, tool) in Tool.allCases.enumerated() {
-            let b = button("\(tool.title) (\(tool.key.uppercased()))", symbol: tool.symbol, action: #selector(changeTool(_:)))
-            b.tag = index; toolBar.addArrangedSubview(b); toolButtons[tool] = b
+        for (index, group) in Self.toolGroups.enumerated() {
+            let b = button(group.title, symbol: group.tools[0].symbol, action: #selector(changeTool(_:))) as! ToolButton
+            b.tag = index; b.hasVariants = group.tools.count > 1
+            if b.hasVariants { b.menu = variantMenu(for: index) }
+            toolBar.addArrangedSubview(b); groupButtons.append(b)
         }
         undoButton = button("Undo (⌘Z)", symbol: "arrow.uturn.backward", action: #selector(undoEdit))
         redoButton = button("Redo (⌘⇧Z)", symbol: "arrow.uturn.forward", action: #selector(redoEdit))
         toolBar.addArrangedSubview(undoButton); toolBar.addArrangedSubview(redoButton)
+        // One compact swatch button; colour and sizes open in a popover anchored to it.
+        let divider = NSBox(); divider.boxType = .separator
+        divider.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        toolBar.addArrangedSubview(divider)
+        styleButton = button("Colour & size", symbol: "circle.fill", action: #selector(showStyle(_:)))
+        toolBar.addArrangedSubview(styleButton)
         panel(actionBar)
-        for (label, symbol, action) in [("Quick save (⌘⇧S)", "bolt", OutputAction.quickSave), ("Copy text (⌘⇧C)", "text.viewfinder", .ocr), ("Save as (⌘S)", "square.and.arrow.down", .save), ("Copy (⌘C)", "square.on.square", .copy)] {
+        for (label, symbol, action) in [("Quick save (⌘⇧S)", "bolt.fill", OutputAction.quickSave), ("Copy text (⌘⇧C)", "text.viewfinder", .ocr), ("Save as… (⌘S)", "square.and.arrow.down", .save), ("Copy (⌘C)", "doc.on.doc", .copy)] {
             let b = button(label, symbol: symbol, action: #selector(output(_:)))
             b.tag = switch action { case .quickSave: 0; case .ocr: 1; case .save: 2; case .copy: 3 }
             actionBar.addArrangedSubview(b)
         }
         actionBar.addArrangedSubview(button("Cancel (Esc)", symbol: "xmark", action: #selector(cancelCapture)))
-        panel(styleBar)
-        let well = NSColorWell(); well.color = NSColor(hex: color); well.target = self; well.action = #selector(colorChanged(_:)); well.setAccessibilityLabel("Annotation colour")
-        well.widthAnchor.constraint(equalToConstant: 35).isActive = true
-        styleBar.addArrangedSubview(well)
-        let slider = NSSlider(value: stroke, minValue: 1, maxValue: 30, target: self, action: #selector(widthChanged(_:)))
-        slider.widthAnchor.constraint(equalToConstant: 55).isActive = true; slider.setAccessibilityLabel("Stroke width")
-        styleBar.addArrangedSubview(styleLabel("Stroke"))
-        styleBar.addArrangedSubview(slider)
-        let textSize = NSSlider(value: fontSize, minValue: 10, maxValue: 120, target: self, action: #selector(fontChanged(_:)))
-        textSize.widthAnchor.constraint(equalToConstant: 55).isActive = true; textSize.setAccessibilityLabel("Text size")
-        styleBar.addArrangedSubview(styleLabel("Text"))
-        styleBar.addArrangedSubview(textSize)
-        let effect = NSSlider(value: strength, minValue: 2, maxValue: 50, target: self, action: #selector(strengthChanged(_:)))
-        effect.widthAnchor.constraint(equalToConstant: 55).isActive = true; effect.setAccessibilityLabel("Blur or pixelate strength")
-        styleBar.addArrangedSubview(styleLabel("Effect"))
-        styleBar.addArrangedSubview(effect)
+        hoverLabel.font = .systemFont(ofSize: 12, weight: .medium); hoverLabel.textColor = .white; hoverLabel.alignment = .center
+        hoverLabel.drawsBackground = false; hoverLabel.wantsLayer = true; hoverLabel.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        hoverLabel.layer?.cornerRadius = 6; hoverLabel.isHidden = true; addSubview(hoverLabel)
         status.textColor = .white; status.backgroundColor = NSColor.black.withAlphaComponent(0.8); status.drawsBackground = true
         status.font = .monospacedSystemFont(ofSize: 12, weight: .medium); status.isHidden = true; addSubview(status)
         updateControls()
     }
-    private func styleLabel(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 10); label.textColor = .secondaryLabelColor
-        return label
-    }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateControls() }
     private func updateControls() {
         let editing = selection != nil
-        for stack in [modeBar, toolBar, actionBar, styleBar] { stack.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
-        modeBar.isHidden = editing; toolBar.isHidden = !editing; actionBar.isHidden = !editing; styleBar.isHidden = !editing
-        for (kind, button) in toolButtons { button.contentTintColor = kind == tool ? .controlAccentColor : .labelColor; button.state = kind == tool ? .on : .off }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            for stack in [modeBar, toolBar, actionBar] { stack.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor; stack.layer?.borderColor = NSColor.separatorColor.cgColor }
+        }
+        if !editing { hoverLabel.isHidden = true }
+        modeBar.isHidden = editing; toolBar.isHidden = !editing; actionBar.isHidden = !editing
+        // The active tool is a filled accent tile with a white glyph, so it reads at a glance.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            for (index, button) in groupButtons.enumerated() {
+                let variant = groupVariant[index], active = variant == tool
+                button.hint = "\(variant.title)  \(variant.key.uppercased())" + (button.hasVariants ? "  ·  click again for more" : "")
+                button.image = NSImage(systemSymbolName: variant.symbol, accessibilityDescription: variant.title)
+                button.setAccessibilityLabel(Self.toolGroups[index].title + ": " + variant.title)
+                button.layer?.backgroundColor = active ? NSColor.controlAccentColor.cgColor : button.hovered ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor
+                button.contentTintColor = active ? .white : .labelColor
+                button.state = active ? .on : .off; button.setAccessibilityValue(active ? "selected" : nil)
+            }
+        }
+        styleButton?.contentTintColor = NSColor(hex: color)
         undoButton?.isEnabled = history.canUndo; redoButton?.isEnabled = history.canRedo
         for (index, view) in modeBar.arrangedSubviews.enumerated() { (view as? NSButton)?.state = CaptureMode.allCases[index] == mode ? .on : .off }
         needsLayout = true; needsDisplay = true; window?.invalidateCursorRects(for: self)
@@ -142,11 +170,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         super.layout()
         modeBar.frame = CGRect(x: (bounds.width - 340) / 2, y: 20, width: 340, height: 40)
         guard let selection else { return }
-        let toolHeight: CGFloat = 430
+        let toolHeight = min(ceil(toolBar.fittingSize.height), bounds.height - 16)
         let right = selection.maxX + 10
-        toolBar.frame = CGRect(x: right + 42 <= bounds.width ? right : max(8, selection.minX - 52), y: max(8, min(selection.minY, bounds.height - toolHeight - 8)), width: 42, height: toolHeight)
-        actionBar.frame = CGRect(x: max(8, min(selection.maxX - 170, bounds.width - 178)), y: min(bounds.height - 46, selection.maxY + 10), width: 170, height: 38)
-        styleBar.frame = CGRect(x: max(8, min(selection.minX, bounds.width - 325)), y: selection.minY > 52 ? selection.minY - 48 : min(bounds.height - 46, selection.maxY + 54), width: 325, height: 38)
+        toolBar.frame = CGRect(x: right + 46 <= bounds.width ? right : max(8, selection.minX - 56), y: max(8, min(selection.minY, bounds.height - toolHeight - 8)), width: 46, height: toolHeight)
+        let barWidth = ceil(actionBar.fittingSize.width)
+        actionBar.frame = CGRect(x: max(8, min(selection.maxX - barWidth, bounds.width - barWidth - 8)), y: min(bounds.height - 52, selection.maxY + 10), width: barWidth, height: 44)
         status.frame = CGRect(x: max(10, (bounds.width - min(780, bounds.width - 40)) / 2), y: bounds.height - 44, width: min(780, bounds.width - 40), height: 24)
     }
     private func pixelPoint(_ p: CGPoint) -> CGPoint {
@@ -176,7 +204,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             let label = " \(Int(dimensions.width)) × \(Int(dimensions.height)) " as NSString
             label.draw(at: CGPoint(x: active.minX, y: max(4, active.minY - 23)), withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.white, .backgroundColor: NSColor.black.withAlphaComponent(0.8)])
             if selection != nil && history.items.isEmpty {
-                for p in corners(active) { NSColor.white.setFill(); NSBezierPath(rect: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6)).fill() }
+                // Eight round grips, corners and side midpoints, like the system screenshot tool.
+                for p in handles(active) {
+                    let dot = NSBezierPath(ovalIn: CGRect(x: p.x - 4.5, y: p.y - 4.5, width: 9, height: 9))
+                    NSColor.white.setFill(); dot.fill(); NSColor.black.withAlphaComponent(0.35).setStroke(); dot.lineWidth = 0.75; dot.stroke()
+                }
             }
         }
         if let id = selectedID, let item = (moving.map { [$0] } ?? history.items).first(where: { $0.id == id }), let selection {
@@ -205,6 +237,27 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         ("\(Int(pixel.x)), \(Int(pixel.y)) \(hex)" as NSString).draw(at: CGPoint(x: rect.minX, y: rect.maxY + 4), withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium), .foregroundColor: NSColor.white, .backgroundColor: NSColor.black])
     }
     private func corners(_ r: CGRect) -> [CGPoint] { [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY)] }
+    /// Corners 0–3 (clockwise from top-left), then side midpoints 4–7: top, right, bottom, left.
+    private func handles(_ r: CGRect) -> [CGPoint] { corners(r) + [CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.minX, y: r.midY)] }
+    /// Which grip a point grabs: a corner or midpoint dot, or anywhere along a side.
+    private func handle(at p: CGPoint, in r: CGRect) -> Int? {
+        if let index = handles(r).firstIndex(where: { hypot($0.x - p.x, $0.y - p.y) < 10 }) { return index }
+        let grip: CGFloat = 6, alongX = p.x > r.minX && p.x < r.maxX, alongY = p.y > r.minY && p.y < r.maxY
+        if alongX && abs(p.y - r.minY) < grip { return 4 }
+        if alongY && abs(p.x - r.maxX) < grip { return 5 }
+        if alongX && abs(p.y - r.maxY) < grip { return 6 }
+        if alongY && abs(p.x - r.minX) < grip { return 7 }
+        return nil
+    }
+    private func resized(_ o: CGRect, handle: Int, to p: CGPoint) -> CGRect {
+        switch handle {
+        case 0...3: Geometry.rect(corners(o)[(handle + 2) % 4], p)
+        case 4: Geometry.rect(CGPoint(x: o.minX, y: p.y), CGPoint(x: o.maxX, y: o.maxY))
+        case 5: Geometry.rect(CGPoint(x: o.minX, y: o.minY), CGPoint(x: p.x, y: o.maxY))
+        case 6: Geometry.rect(CGPoint(x: o.minX, y: o.minY), CGPoint(x: o.maxX, y: p.y))
+        default: Geometry.rect(CGPoint(x: p.x, y: o.minY), CGPoint(x: o.maxX, y: o.maxY))
+        }
+    }
     override func mouseMoved(with event: NSEvent) {
         pointer = clamped(convert(event.locationInWindow, from: nil))
         if selection == nil {
@@ -228,7 +281,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             }
             if moving == nil && history.items.isEmpty {
                 originalSelection = selection
-                resizeCorner = corners(selection).firstIndex(where: { hypot($0.x - start.x, $0.y - start.y) < 10 })
+                resizeHandle = handle(at: start, in: selection)
             }
             needsDisplay = true; return
         }
@@ -247,7 +300,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         if var moving, let original = history.items.first(where: { $0.id == moving.id }) {
             moving = original.moved(by: CGPoint(x: (pointer.x - start.x) * scaleX, y: (pointer.y - start.y) * scaleY)); self.moving = moving
         } else if let originalSelection {
-            if let corner = resizeCorner { let opposite = corners(originalSelection)[(corner + 2) % 4]; selection = Geometry.rect(opposite, pointer).intersection(bounds) }
+            if let resizeHandle { selection = resized(originalSelection, handle: resizeHandle, to: pointer).intersection(bounds) }
             else {
                 var moved = originalSelection.offsetBy(dx: pointer.x - start.x, dy: pointer.y - start.y)
                 moved.origin.x = max(0, min(bounds.width - moved.width, moved.minX)); moved.origin.y = max(0, min(bounds.height - moved.height, moved.minY)); selection = moved
@@ -280,7 +333,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             if meaningful { history.commit(history.items + [draft]) }
             self.draft = nil
         }
-        originalSelection = nil; resizeCorner = nil; refreshPreview(); updateControls()
+        originalSelection = nil; resizeHandle = nil; refreshPreview(); updateControls()
     }
     private func beginText(at point: CGPoint, existing: Annotation? = nil) {
         commitText()
@@ -308,7 +361,52 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     }
     func showMessage(_ message: String) { status.stringValue = " \(message) "; status.isHidden = false; needsLayout = true; NSAccessibility.post(element: status, notification: .announcementRequested, userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.high.rawValue]) }
     @objc private func changeMode(_ sender: NSButton) { mode = CaptureMode.allCases[sender.tag]; hoveredWindow = nil; updateControls() }
-    @objc private func changeTool(_ sender: NSButton) { commitText(); tool = Tool.allCases[sender.tag]; selectedID = nil; updateControls(); privacyHint() }
+    /// Names each control the instant the pointer reaches it, on the side facing away from the selection.
+    private func showHint(for button: ToolButton, _ inside: Bool) {
+        if button.state != .on || !groupButtons.contains(where: { $0 === button }) {
+            effectiveAppearance.performAsCurrentDrawingAppearance { button.layer?.backgroundColor = inside ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor }
+        }
+        guard inside, !button.hint.isEmpty, let bar = button.superview, !bar.isHidden else { hoverLabel.isHidden = true; return }
+        hoverLabel.stringValue = button.hint
+        let size = CGSize(width: ceil(hoverLabel.intrinsicContentSize.width) + 16, height: 22)
+        let frame = convert(button.bounds, from: button)
+        var origin: CGPoint
+        if bar === toolBar {
+            let onRight = toolBar.frame.minX > (selection?.maxX ?? 0)
+            origin = CGPoint(x: onRight ? toolBar.frame.maxX + 8 : toolBar.frame.minX - size.width - 8, y: frame.midY - size.height / 2)
+            if origin.x + size.width > bounds.width - 4 || origin.x < 4 { origin.x = onRight ? toolBar.frame.minX - size.width - 8 : toolBar.frame.maxX + 8 }
+        } else {
+            origin = CGPoint(x: frame.midX - size.width / 2, y: bar.frame.maxY + 6)
+            if origin.y + size.height > bounds.height - 4 { origin.y = bar.frame.minY - size.height - 6 }
+        }
+        origin.x = max(4, min(bounds.width - size.width - 4, origin.x))
+        hoverLabel.frame = CGRect(origin: origin, size: size); hoverLabel.isHidden = false
+    }
+    @objc private func changeTool(_ sender: NSButton) {
+        let variant = groupVariant[sender.tag]
+        // Clicking the active grouped tool again offers its other variants.
+        if variant == tool, Self.toolGroups[sender.tag].tools.count > 1, let menu = sender.menu {
+            menu.items.forEach { $0.state = ($0.representedObject as? String) == tool.rawValue ? .on : .off }
+            menu.popUp(positioning: nil, at: CGPoint(x: sender.bounds.maxX + 6, y: sender.bounds.minY), in: sender); return
+        }
+        select(variant)
+    }
+    private func select(_ newTool: Tool) {
+        commitText()
+        if let group = Self.toolGroups.firstIndex(where: { $0.tools.contains(newTool) }) { groupVariant[group] = newTool }
+        tool = newTool; selectedID = nil; updateControls(); privacyHint()
+    }
+    private func variantMenu(for group: Int) -> NSMenu {
+        let menu = NSMenu()
+        for variant in Self.toolGroups[group].tools {
+            let item = NSMenuItem(title: variant.title, action: #selector(pickVariant(_:)), keyEquivalent: variant.key)
+            item.keyEquivalentModifierMask = []; item.target = self; item.representedObject = variant.rawValue
+            item.image = NSImage(systemSymbolName: variant.symbol, accessibilityDescription: nil)
+            menu.addItem(item)
+        }
+        return menu
+    }
+    @objc private func pickVariant(_ sender: NSMenuItem) { if let raw = sender.representedObject as? String, let picked = Tool(rawValue: raw) { select(picked) } }
     private func privacyHint() {
         if tool == .redact { showMessage("Redact permanently replaces pixels in copied and saved images.") }
         else if tool == .blur || tool == .pixelate { showMessage("Visual effect only. Use Redact to protect private information.") }
@@ -322,9 +420,41 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         guard let id = selectedID, let index = history.items.firstIndex(where: { $0.id == id }) else { return }
         var items = history.items; change(&items[index]); history.commit(items); refreshPreview(); updateControls()
     }
+    private func makeStylePopover() -> NSPopover {
+        colorWell.target = self; colorWell.action = #selector(colorChanged(_:)); colorWell.setAccessibilityLabel("Annotation colour")
+        colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        var rows: [[NSView]] = [[popoverLabel("Colour"), colorWell]]
+        for (title, range, action) in [("Stroke", 1.0...30.0, #selector(widthChanged(_:))), ("Text", 10.0...120.0, #selector(fontChanged(_:))), ("Effect", 2.0...50.0, #selector(strengthChanged(_:)))] {
+            let slider = NSSlider(value: range.lowerBound, minValue: range.lowerBound, maxValue: range.upperBound, target: self, action: action)
+            slider.controlSize = .small; slider.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            slider.setAccessibilityLabel(title == "Effect" ? "Blur or pixelate strength" : title == "Text" ? "Text size" : "Stroke width")
+            styleSliders.append(slider); rows.append([popoverLabel(title), slider])
+        }
+        let grid = NSGridView(views: rows); grid.rowSpacing = 10; grid.columnSpacing = 12
+        grid.column(at: 0).xPlacement = .trailing; grid.rowAlignment = .firstBaseline
+        let container = NSView(); grid.translatesAutoresizingMaskIntoConstraints = false; container.addSubview(grid)
+        NSLayoutConstraint.activate([grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 14), grid.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -14),
+                                     grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16), grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16)])
+        let controller = NSViewController(); controller.view = container
+        let popover = NSPopover(); popover.contentViewController = controller; popover.behavior = .transient; popover.animates = true
+        return popover
+    }
+    private func popoverLabel(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: NSFont.smallSystemFontSize); label.textColor = .secondaryLabelColor
+        return label
+    }
+    @objc private func showStyle(_ sender: NSButton) {
+        if stylePopover.isShown { stylePopover.performClose(nil); return }
+        commitText()
+        _ = stylePopover.contentViewController?.view
+        colorWell.color = NSColor(hex: color)
+        for (slider, value) in zip(styleSliders, [stroke, fontSize, strength]) { slider.doubleValue = value }
+        stylePopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: toolBar.frame.minX > (selection?.maxX ?? 0) ? .maxX : .minX)
+    }
     @objc private func colorChanged(_ sender: NSColorWell) {
         color = sender.color.hex
         if tool == .redact { coordinator.preferences.value.redactColor = color }
+        styleButton.contentTintColor = sender.color
         updateSelected { $0.color = color }
     }
     @objc private func widthChanged(_ sender: NSSlider) { stroke = sender.doubleValue; updateSelected { $0.width = stroke } }
@@ -347,12 +477,38 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             }
         } else if event.keyCode == 51 || event.keyCode == 117 {
             if let selectedID { history.commit(history.items.filter { $0.id != selectedID }); self.selectedID = nil; refreshPreview(); updateControls() }
-        } else if let tool = Tool.allCases.first(where: { $0.key == key }) { self.tool = tool; selectedID = nil; updateControls(); privacyHint() }
+        } else if let tool = Tool.allCases.first(where: { $0.key == key }) { select(tool) }
         else { super.keyDown(with: event) }
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if textField != nil { return super.performKeyEquivalent(with: event) }
         if event.modifierFlags.contains(.command), ["c", "s", "z"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") { keyDown(with: event); return true }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// Tool bar button; grouped tools get a small corner triangle, as in Apple's own tool palettes.
+final class ToolButton: NSButton {
+    var hasVariants = false { didSet { needsDisplay = true } }
+    var hint = ""
+    var onHover: ((ToolButton, Bool) -> Void)?
+    private(set) var hovered = false
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; onHover?(self, true) }
+    override func mouseExited(with event: NSEvent) { hovered = false; onHover?(self, false) }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard hasVariants else { return }
+        let r = bounds, size: CGFloat = 4.5, inset: CGFloat = 3
+        let corner = NSBezierPath()
+        corner.move(to: CGPoint(x: r.maxX - inset, y: isFlipped ? r.maxY - inset : r.minY + inset))
+        corner.line(to: CGPoint(x: r.maxX - inset - size, y: isFlipped ? r.maxY - inset : r.minY + inset))
+        corner.line(to: CGPoint(x: r.maxX - inset, y: isFlipped ? r.maxY - inset - size : r.minY + inset + size))
+        corner.close()
+        (state == .on ? NSColor.white : NSColor.secondaryLabelColor).setFill(); corner.fill()
     }
 }

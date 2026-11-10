@@ -151,6 +151,15 @@ struct FilenameTests {
         let safe = try Renderer.render(source: #require(context.makeImage()), crop: CGRect(x: 0, y: 0, width: 400, height: 100), items: [redact])
         #expect(try await TextRecognition.recognize(safe).isEmpty)
     }
+    @Test func visionRecognizesRenderedText() async throws {
+        let context = try #require(CGContext(data: nil, width: 800, height: 200, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 800, height: 200))
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        ("Hello FastShot" as NSString).draw(at: CGPoint(x: 40, y: 70), withAttributes: [.font: NSFont.systemFont(ofSize: 48), .foregroundColor: NSColor.black])
+        NSGraphicsContext.restoreGraphicsState()
+        let image = try Renderer.render(source: #require(context.makeImage()), crop: CGRect(x: 0, y: 0, width: 800, height: 200), items: [])
+        #expect(try await TextRecognition.recognize(image).contains("FastShot"))
+    }
 }
 
 struct FileOutputTests {
@@ -190,6 +199,13 @@ struct FileOutputTests {
             view.keyDown(with: try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)))
         }
         try drag(CGPoint(x: 10, y: 10), CGPoint(x: 90, y: 70))
+        #expect(view.pixelCrop == CGRect(x: 10, y: 10, width: 80, height: 60))
+        try drag(CGPoint(x: 90, y: 40), CGPoint(x: 80, y: 40)) // right-side midpoint handle
+        #expect(view.selection == CGRect(x: 10, y: 10, width: 70, height: 60))
+        try drag(CGPoint(x: 45, y: 70), CGPoint(x: 45, y: 75)) // anywhere along the bottom edge
+        #expect(view.selection == CGRect(x: 10, y: 10, width: 70, height: 65))
+        try drag(CGPoint(x: 80, y: 30), CGPoint(x: 90, y: 30))
+        try drag(CGPoint(x: 45, y: 75), CGPoint(x: 45, y: 70))
         #expect(view.pixelCrop == CGRect(x: 10, y: 10, width: 80, height: 60))
         try key("x", 7)
         try drag(CGPoint(x: 20, y: 20), CGPoint(x: 40, y: 40))

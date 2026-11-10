@@ -13,7 +13,7 @@ struct FastShotApp: App {
             ContentView(model: model).background(WindowRegistration())
                 .onAppear { delegate.model = model; model.start() }
         }
-        .defaultSize(width: 940, height: 740).windowResizability(.contentMinSize)
+        .defaultSize(width: 780, height: 580).windowResizability(.contentMinSize).windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
                 ForEach(CaptureMode.allCases) { mode in Button("Capture \(mode.title)") { model.capture.begin(mode) } }
