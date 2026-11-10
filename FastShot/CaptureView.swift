@@ -288,14 +288,13 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         }
         if !editing { hoverLabel.isHidden = true }
         modeBar.isHidden = editing || !coordinator.preferences.value.showCaptureModePanel; toolBar.isHidden = !editing; actionBar.isHidden = !editing
-        // The active tool is a light grey tile behind its black glyph.
+        // The active tool is a light grey tile behind its black glyph (drawn by ToolButton).
         effectiveAppearance.performAsCurrentDrawingAppearance {
             for (index, button) in groupButtons.enumerated() {
                 let variant = groupVariant[index], active = variant == tool
                 button.hint = "\(variant.title)  \(variant.key.uppercased())" + (button.hasVariants ? "  ·  click again for more" : "")
                 button.image = NSImage(systemSymbolName: variant.symbol, accessibilityDescription: variant.title)
                 button.setAccessibilityLabel(Self.toolGroups[index].title + ": " + variant.title)
-                button.layer?.backgroundColor = active ? NSColor.black.withAlphaComponent(0.1).cgColor : NSColor.clear.cgColor
                 button.contentTintColor = .black
                 button.state = active ? .on : .off; button.setAccessibilityValue(active ? "selected" : nil)
             }
@@ -533,9 +532,6 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             onEditorHover?(button, inside)
             return
         }
-        if button.state != .on || !groupButtons.contains(where: { $0 === button }) {
-            effectiveAppearance.performAsCurrentDrawingAppearance { button.layer?.backgroundColor = inside ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor }
-        }
         guard inside, !button.hint.isEmpty, let bar = button.superview, !bar.isHidden else { hoverLabel.isHidden = true; return }
         hoverLabel.stringValue = button.hint
         let size = CGSize(width: ceil(hoverLabel.intrinsicContentSize.width) + 16, height: 22)
@@ -666,6 +662,9 @@ final class ToolButton: NSButton {
     var hint = ""
     var onHover: ((ToolButton, Bool) -> Void)?
     private(set) var hovered = false
+    override var state: NSControl.StateValue { didSet { needsDisplay = true } }
+    /// Hover, press and selection share one tile, inset so neighbouring tiles never touch.
+    private var tileRect: CGRect { bounds.insetBy(dx: 4, dy: 3) }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
@@ -677,9 +676,11 @@ final class ToolButton: NSButton {
         if usesBlackGlyphs {
             // Keep enabled glyphs black during tracking; history buttons become
             // grey when their action is unavailable.
-            if cell?.isHighlighted == true || hovered {
-                NSColor.black.withAlphaComponent(cell?.isHighlighted == true ? 0.18 : 0.08).setFill()
-                NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
+            let pressed = cell?.isHighlighted == true, selected = state == .on
+            if pressed || hovered || selected {
+                let alpha: CGFloat = pressed ? 0.16 : selected ? (hovered ? 0.13 : 0.1) : 0.06
+                NSColor.black.withAlphaComponent(alpha).setFill()
+                NSBezierPath(roundedRect: tileRect, xRadius: 6, yRadius: 6).fill()
             }
             if let symbol = image?.withSymbolConfiguration(.init(pointSize: 16, weight: .medium)) {
                 let black = NSImage(size: symbol.size, flipped: false) { rect in
@@ -699,7 +700,7 @@ final class ToolButton: NSButton {
             super.draw(dirtyRect)
         }
         guard hasVariants else { return }
-        let r = bounds, size: CGFloat = 4.5, inset: CGFloat = 3
+        let r = usesBlackGlyphs ? tileRect : bounds, size: CGFloat = 4, inset: CGFloat = 2.5
         let corner = NSBezierPath()
         corner.move(to: CGPoint(x: r.maxX - inset, y: isFlipped ? r.maxY - inset : r.minY + inset))
         corner.line(to: CGPoint(x: r.maxX - inset - size, y: isFlipped ? r.maxY - inset : r.minY + inset))
