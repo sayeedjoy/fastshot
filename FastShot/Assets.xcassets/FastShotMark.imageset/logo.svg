@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3F3F46"/>
+      <stop offset="0.55" stop-color="#18181B"/>
+      <stop offset="1" stop-color="#18181B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#1E1B4B" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#glow)"/>
+
+  <!-- Capture frame corners -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="68" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)">
+    <path d="M232 396 V292 Q232 232 292 232 H396"/>
+    <path d="M628 232 H732 Q792 232 792 292 V396"/>
+    <path d="M792 628 V732 Q792 792 732 792 H628"/>
+    <path d="M396 792 H292 Q232 792 232 732 V628"/>
+  </g>
+
+  <!-- Lightning bolt -->
+  <path d="M574 300 L376 560 H500 L456 724 L664 452 H536 Z"
+        fill="url(#bolt)" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round"
+        filter="url(#shadow)"/>
+</svg>
