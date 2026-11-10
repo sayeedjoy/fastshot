@@ -41,9 +41,17 @@ CNF
   ask_permission=true # the signature changes this once, so the old permission entry no longer matches
 fi
 
-xcodebuild -project FastShot.xcodeproj -scheme FastShot -configuration Release -destination 'generic/platform=macOS' \
-  -derivedDataPath .build-xcode CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build -quiet 2>&1 | grep -v "\[MT\]" || true
-[[ -d "$BUILT" ]] || { echo "Build failed." >&2; exit 1; }
+build_log=$(mktemp /tmp/fastshot-install-build.XXXXXX)
+if ! xcodebuild -project FastShot.xcodeproj -scheme FastShot -configuration Release -destination 'generic/platform=macOS' \
+  -derivedDataPath .build-xcode CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build -quiet >"$build_log" 2>&1; then
+  cat "$build_log"
+  rm -f "$build_log"
+  echo "Build failed; the installed app was not replaced." >&2
+  exit 1
+fi
+sed '/\[MT\]/d' "$build_log"
+rm -f "$build_log"
+[[ -x "$BUILT/Contents/MacOS/FastShot" ]] || { echo "Built executable is missing." >&2; exit 1; }
 
 # Quit the running copy (gracefully, then forcefully) before replacing it.
 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
@@ -53,7 +61,7 @@ pkill -x FastShot 2>/dev/null || true
 mkdir -p "$HOME/Applications"
 rm -rf "$DEST"
 ditto "$BUILT" "$DEST"
-codesign --force --deep --options runtime --timestamp=none --sign "$IDENTITY" "$DEST"
+codesign --force --deep --entitlements FastShot.entitlements --options runtime --timestamp=none --sign "$IDENTITY" "$DEST"
 
 # Remove old build products so Spotlight and Launch Services can't pick them.
 stale=("$BUILT" .build-xcode/Build/Products/Debug/FastShot.app $HOME/Library/Developer/Xcode/DerivedData/FastShot-*/Build/Products/*/FastShot.app(N))

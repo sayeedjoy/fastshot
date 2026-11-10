@@ -8,6 +8,7 @@ nonisolated struct Preferences: Codable {
     var shortcutModifiers: UInt32 = UInt32(cmdKey | shiftKey)
     var shortcutLabel = "⌘ ⇧ 9"
     var defaultMode: CaptureMode = .region
+    var showCaptureModePanel = true
     var format = "png"
     var jpegQuality = 90.0
     var directoryBookmark: Data?
@@ -22,6 +23,61 @@ nonisolated struct Preferences: Codable {
     var onboardingComplete = false
     var showMagnifier = true
     var autoSelectWindow = true
+    var showAfterCapture = true
+    var copyAfterCapture = false
+    var saveAfterCapture = false
+    var areaDestination = AreaDestination.editor
+    var thumbnailDismissal = ThumbnailDismissal.manual
+    var shortcuts: [String: ShortcutBinding] = [:]
+
+    init() {}
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        shortcutKey = try c.decodeIfPresent(UInt32.self, forKey: .shortcutKey) ?? 25
+        shortcutModifiers = try c.decodeIfPresent(UInt32.self, forKey: .shortcutModifiers) ?? UInt32(cmdKey | shiftKey)
+        shortcutLabel = try c.decodeIfPresent(String.self, forKey: .shortcutLabel) ?? "⌘ ⇧ 9"
+        defaultMode = try c.decodeIfPresent(CaptureMode.self, forKey: .defaultMode) ?? .region
+        showCaptureModePanel = try c.decodeIfPresent(Bool.self, forKey: .showCaptureModePanel) ?? true
+        format = try c.decodeIfPresent(String.self, forKey: .format) ?? "png"
+        jpegQuality = try c.decodeIfPresent(Double.self, forKey: .jpegQuality) ?? 90
+        filenameTemplate = try c.decodeIfPresent(String.self, forKey: .filenameTemplate) ?? "Screenshot-{date}-{time}"
+        theme = try c.decodeIfPresent(String.self, forKey: .theme) ?? "system"
+        annotationColor = try c.decodeIfPresent(String.self, forKey: .annotationColor) ?? "#e11d48"
+        strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 3
+        fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize) ?? 24
+        redactColor = try c.decodeIfPresent(String.self, forKey: .redactColor) ?? "#000000"
+        keepRunning = try c.decodeIfPresent(Bool.self, forKey: .keepRunning) ?? true
+        onboardingComplete = try c.decodeIfPresent(Bool.self, forKey: .onboardingComplete) ?? false
+        showMagnifier = try c.decodeIfPresent(Bool.self, forKey: .showMagnifier) ?? true
+        autoSelectWindow = try c.decodeIfPresent(Bool.self, forKey: .autoSelectWindow) ?? true
+        showAfterCapture = try c.decodeIfPresent(Bool.self, forKey: .showAfterCapture) ?? true
+        copyAfterCapture = try c.decodeIfPresent(Bool.self, forKey: .copyAfterCapture) ?? false
+        saveAfterCapture = try c.decodeIfPresent(Bool.self, forKey: .saveAfterCapture) ?? false
+        areaDestination = try c.decodeIfPresent(AreaDestination.self, forKey: .areaDestination) ?? .editor
+        thumbnailDismissal = try c.decodeIfPresent(ThumbnailDismissal.self, forKey: .thumbnailDismissal) ?? .manual
+        shortcuts = try c.decodeIfPresent([String: ShortcutBinding].self, forKey: .shortcuts) ?? [:]
+        directoryBookmark = try c.decodeIfPresent(Data.self, forKey: .directoryBookmark)
+        directoryPath = try c.decodeIfPresent(String.self, forKey: .directoryPath)
+    }
+
+    func menuBinding(for mode: CaptureMode) -> ShortcutBinding? {
+        let action: CaptureCommand = switch mode {
+        case .region: .area
+        case .window: .anyWindow
+        case .display: .fullscreen
+        }
+        // The default capture shortcut opens this mode unless it has a dedicated binding.
+        return binding(for: action) ?? (mode == defaultMode ? binding(for: .capture) : nil)
+    }
+
+    func binding(for action: CaptureCommand) -> ShortcutBinding? {
+        if let stored = shortcuts[action.rawValue] { return stored.key == nil ? nil : stored }
+        return action == .capture ? ShortcutBinding(key: shortcutKey, modifiers: shortcutModifiers, label: shortcutLabel) : nil
+    }
+
+    var captureShortcutLabel: String {
+        binding(for: .capture)?.label ?? "No shortcut assigned"
+    }
 }
 
 @Observable final class PreferencesStore {

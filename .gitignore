@@ -46,3 +46,11 @@ fastlane/test_output
 .idea/
 *.swp
 *~
+
+# Release build output
+.build-release/
+.build-release-packages/
+dist/
+
+# Local release-key validation helper
+scripts/validate-sparkle-key.swift

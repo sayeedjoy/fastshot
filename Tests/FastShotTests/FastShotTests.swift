@@ -148,17 +148,24 @@ struct FilenameTests {
         let context = try #require(CGContext(data: nil, width: 400, height: 100, bitsPerComponent: 8, bytesPerRow: 1600, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 400, height: 100))
         let redact = Annotation(tool: .redact, points: [.zero, CGPoint(x: 400, y: 100)], color: "#000000")
-        let safe = try Renderer.render(source: #require(context.makeImage()), crop: CGRect(x: 0, y: 0, width: 400, height: 100), items: [redact])
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        ("SECRET 123" as NSString).draw(at: CGPoint(x: 20, y: 30), withAttributes: [.font: NSFont.systemFont(ofSize: 32), .foregroundColor: NSColor.black])
+        NSGraphicsContext.restoreGraphicsState()
+        let original = try #require(context.makeImage())
+        #expect(try await TextRecognition.recognize(original).contains("SECRET"))
+        let safe = try Renderer.recognitionImage(source: original, crop: CGRect(x: 0, y: 0, width: 400, height: 100), items: [redact])
         #expect(try await TextRecognition.recognize(safe).isEmpty)
     }
-    @Test func visionRecognizesRenderedText() async throws {
-        let context = try #require(CGContext(data: nil, width: 800, height: 200, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 800, height: 200))
+    @Test(arguments: [("Hello FastShot", TextRecognition.Mode.fast), ("日本語の文字認識", .accurate),
+                      ("https://example.com/item?id=123", .fast)])
+    func visionRecognizesRenderedText(_ text: String, _ mode: TextRecognition.Mode) async throws {
+        let context = try #require(CGContext(data: nil, width: 1800, height: 200, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 1800, height: 200))
         NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        ("Hello FastShot" as NSString).draw(at: CGPoint(x: 40, y: 70), withAttributes: [.font: NSFont.systemFont(ofSize: 48), .foregroundColor: NSColor.black])
+        (text as NSString).draw(at: CGPoint(x: 40, y: 70), withAttributes: [.font: NSFont.systemFont(ofSize: 48), .foregroundColor: NSColor.black])
         NSGraphicsContext.restoreGraphicsState()
-        let image = try Renderer.render(source: #require(context.makeImage()), crop: CGRect(x: 0, y: 0, width: 800, height: 200), items: [])
-        #expect(try await TextRecognition.recognize(image).contains("FastShot"))
+        let image = try Renderer.render(source: #require(context.makeImage()), crop: CGRect(x: 0, y: 0, width: 1800, height: 200), items: [])
+        #expect(try await TextRecognition.recognize(image, mode: mode).contains(text))
     }
 }
 
@@ -241,13 +248,36 @@ struct FileOutputTests {
         await coordinator.checkScreenPermission()
         #expect(requests == 1)
         #expect(coordinator.permissionNeeded)
+        #expect(!coordinator.screenAccessGranted)
         #expect(coordinator.message?.contains("Reveal FastShot") == true)
         #expect(!coordinator.busy)
         await coordinator.checkScreenPermission()
         #expect(requests == 2)
         #expect(!coordinator.permissionNeeded)
+        #expect(coordinator.screenAccessGranted)
         #expect(coordinator.message?.contains("ready") == true)
         #expect(!coordinator.busy)
+    }
+    @Test func refreshTracksGrantAndRevocationWithoutRequestingPermission() async throws {
+        var granted = true
+        var requests = 0
+        let coordinator = CaptureCoordinator(preferences: try store(), permissionPreflight: { granted }, permissionRequest: {
+            requests += 1
+            throw FastShotError.message("Denied")
+        })
+        #expect(coordinator.screenAccessGranted)
+        granted = false
+        coordinator.refreshScreenPermission()
+        #expect(!coordinator.screenAccessGranted)
+        #expect(requests == 0)
+        await coordinator.checkScreenPermission()
+        #expect(coordinator.permissionNeeded)
+        granted = true
+        coordinator.refreshScreenPermission()
+        #expect(coordinator.screenAccessGranted)
+        #expect(!coordinator.permissionNeeded)
+        #expect(coordinator.message == nil)
+        #expect(requests == 1)
     }
     @Test func busyRequestDoesNotPromptAgain() async throws {
         var requests = 0
@@ -256,5 +286,52 @@ struct FileOutputTests {
         await coordinator.checkScreenPermission()
         #expect(requests == 0)
         #expect(coordinator.busy)
+    }
+}
+
+@MainActor struct OCRInputTests {
+    @Test func uneditedCropPreservesPixelsAndOrientation() throws {
+        let source = try RendererTests().fixture()
+        let image = try Renderer.recognitionImage(source: source, crop: CGRect(x: 10, y: 2, width: 30, height: 76), items: [])
+        #expect(image.width == 30 && image.height == 76)
+        #expect(try RendererTests().pixel(image, 0, 0).redComponent > 0.95)
+        #expect(try RendererTests().pixel(image, 0, 75).blueComponent > 0.95)
+        let unchanged = try TextRecognition.boundedImage(image)
+        #expect(unchanged.width == image.width && unchanged.height == image.height)
+        #expect(throws: FastShotError.self) {
+            try Renderer.recognitionImage(source: source, crop: .zero, items: [])
+        }
+    }
+
+    @Test func largeRetinaInputIsBoundedWithoutFlipping() throws {
+        let context = try #require(CGContext(data: nil, width: 6000, height: 2000, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(NSColor.blue.cgColor); context.fill(CGRect(x: 0, y: 0, width: 6000, height: 2000))
+        context.setFillColor(NSColor.red.cgColor); context.fill(CGRect(x: 0, y: 1000, width: 6000, height: 1000))
+        let image = try TextRecognition.boundedImage(#require(context.makeImage()))
+        #expect(max(image.width, image.height) <= 4096)
+        #expect(image.width * image.height <= 8_000_000)
+        #expect(abs(Double(image.width) / Double(image.height) - 3) < 0.01)
+        #expect(try RendererTests().pixel(image, 5, 5).redComponent > 0.95)
+        #expect(try RendererTests().pixel(image, 5, image.height - 5).blueComponent > 0.95)
+    }
+
+    @Test func denseScreenshotKeepsEveryLineInOrder() async throws {
+        let context = try #require(CGContext(data: nil, width: 2560, height: 1600, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 2560, height: 1600))
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        let lines = (0..<30).map { "FastShot screenshot text line \($0 + 20): Copy code, URLs https://example.com and numbers 0123456789." }
+        for (row, text) in lines.enumerated() {
+            (text as NSString).draw(at: CGPoint(x: 40, y: 40 + row * 50), withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 24, weight: .regular), .foregroundColor: NSColor.black])
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let image = try Renderer.recognitionImage(source: #require(context.makeImage()),
+            crop: CGRect(x: 0, y: 0, width: 2560, height: 1600), items: [])
+        let start = ContinuousClock.now
+        let text = try await TextRecognition.recognize(image)
+        print("Native fast OCR, 2560×1600 / 30 lines: \(start.duration(to: .now))")
+        #expect(text == lines.reversed().joined(separator: "\n"))
     }
 }

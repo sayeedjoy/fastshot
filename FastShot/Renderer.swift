@@ -6,6 +6,15 @@ import UniformTypeIdentifiers
 /// All geometry is top-left source-image pixels. Preview, OCR and export use this renderer.
 enum Renderer {
     static let ciContext = CIContext(options: [.cacheIntermediates: false])
+    /// Unedited captures need only a crop; edited captures must be sanitized first.
+    static func recognitionImage(source: CGImage, crop: CGRect, items: [Annotation]) throws -> CGImage {
+        guard items.isEmpty else { return try render(source: source, crop: crop, items: items) }
+        let rect = crop.intersection(CGRect(x: 0, y: 0, width: source.width, height: source.height)).integral
+        guard rect.width >= 1, rect.height >= 1, let image = source.cropping(to: rect) else {
+            throw FastShotError.message("The selection is empty. Try selecting an area again.")
+        }
+        return image
+    }
     static func render(source: CGImage, crop: CGRect, items: [Annotation]) throws -> CGImage {
         let crop = crop.intersection(CGRect(x: 0, y: 0, width: source.width, height: source.height)).integral
         guard crop.width >= 1, crop.height >= 1, let base = source.cropping(to: crop),

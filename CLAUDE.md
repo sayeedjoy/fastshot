@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-FastShot is a native macOS (14+) menu-bar screenshot utility: capture a region/window/display, annotate, permanently redact, then copy, save, or OCR. SwiftUI + AppKit, ScreenCaptureKit, Core Graphics/Core Image, on-device Vision. No network code, accounts, or telemetry.
+FastShot is a native macOS (14+) menu-bar screenshot utility: capture a region/window/display, annotate, permanently redact, then copy, save, or OCR. SwiftUI + AppKit, ScreenCaptureKit, Core Graphics/Core Image, on-device Vision. No accounts or telemetry. Sparkle checks GitHub Releases for signed app updates; captures and OCR stay local.
 
 ## Commands
 
@@ -27,6 +27,7 @@ There is no linter configured. Tests need no screen-recording permission (they u
 
 - `Package.swift` (SwiftPM) is used for `swift build` / `swift test`. The test target lives only here — the Xcode project has no test target.
 - `FastShot.xcodeproj` builds the actual `.app` (bundle ID `com.zerox.FastShot`, hardened runtime, **no App Sandbox** so the default save location is the real `~/Documents/FastShot`). It references the `FastShot/` folder as a whole, so new source files are picked up automatically by both systems.
+- The Xcode app links Sparkle 2.10.1 for updates; SwiftPM remains a dependency-free test harness.
 - Both are configured for **MainActor default isolation** (SwiftPM: `.defaultIsolation(MainActor.self)` + `NonisolatedNonsendingByDefault`; Xcode: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, approachable concurrency). Pure value types and helpers (`Annotation`, `Tool`, `Geometry`, `Filename`, `OutputFiles`, `Preferences`, `TextRecognition`…) are explicitly marked `nonisolated`; keep that pattern for new non-UI types. Off-main work uses `@concurrent` (see `TextRecognition.recognize`).
 - Resource lookup differs: code branches on `#if SWIFT_PACKAGE` to use `Bundle.module` (resources under `Resources/`) vs `Bundle.main`. Follow the same pattern when loading bundled files (`AnnotationFont.ttf`, `logo.png`, `tray-template.png`).
 

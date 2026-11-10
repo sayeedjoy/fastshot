@@ -2,4 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>NSScreenCaptureUsageDescription</key><string>FastShot captures your screen so you can annotate, redact and share screenshots.</string>
+<key>SUFeedURL</key><string>$(SPARKLE_FEED_URL)</string>
+<key>SUPublicEDKey</key><string>$(SPARKLE_PUBLIC_KEY)</string>
+<key>SUEnableAutomaticChecks</key><true/>
+<key>SUAutomaticallyUpdate</key><false/>
 </dict></plist>

@@ -16,16 +16,30 @@ struct FastShotApp: App {
         .defaultSize(width: 780, height: 580).windowResizability(.contentMinSize).windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                ForEach(CaptureMode.allCases) { mode in Button("Capture \(mode.title)") { model.capture.begin(mode) } }
+                ForEach(CaptureMode.allCases) { mode in captureButton(mode) }
             }
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton(updates: model.updates) }
             CommandGroup(replacing: .appSettings) { Button("Settings…") { model.capture.showSettings() }.keyboardShortcut(",") }
         }
         MenuBarExtra {
-            ForEach(CaptureMode.allCases) { mode in Button("Capture \(mode.title)", systemImage: mode.symbol) { model.capture.begin(mode) } }
+            ForEach(CaptureMode.allCases) { mode in captureButton(mode) }
+            ForEach([CaptureCommand.repeatArea, .activeWindow, .scrolling, .recognition]) { command in
+                Button(command.title) { model.capture.perform(command) }
+                    .keyboardShortcut(model.preferences.value.binding(for: command)?.menuShortcut)
+            }
+            if !model.capture.pins.isEmpty {
+                Divider()
+                Button("Close Pinned Screenshots", systemImage: "pin.slash") { model.capture.closeAllPins() }
+            }
             Divider()
             Button("Settings…") { model.capture.showSettings() }.keyboardShortcut(",")
+            CheckForUpdatesButton(updates: model.updates)
             Button("Quit FastShot") { NSApp.terminate(nil) }.keyboardShortcut("q")
-        } label: { Image(nsImage: Brand.menuBarImage).accessibilityLabel("FastShot") }
+        } label: { Image(nsImage: Brand.captureMenuBarImage(progress: model.capture.captureFeedbackProgress)).accessibilityLabel("FastShot") }
+    }
+    private func captureButton(_ mode: CaptureMode) -> some View {
+        Button("Capture \(mode.title)", systemImage: mode.symbol) { model.capture.begin(mode) }
+            .keyboardShortcut(model.preferences.value.menuBinding(for: mode)?.menuShortcut)
     }
 }
 
@@ -33,6 +47,7 @@ struct FastShotApp: App {
     var preferences: PreferencesStore
     let capture: CaptureCoordinator
     let shortcut = GlobalShortcut()
+    let updates = AppUpdates()
     var shortcutError: String?
     var recordingShortcut = false
     private var started = false
@@ -50,9 +65,15 @@ struct FastShotApp: App {
             }
         } catch { preferences.error = "Could not initialize FastShot: \(error.localizedDescription)" }
 
-        shortcut.onCapture = { [weak self] in guard let self, !recordingShortcut else { return }; capture.begin() }
-        do { try shortcut.register(key: preferences.value.shortcutKey, modifiers: preferences.value.shortcutModifiers) }
-        catch { shortcutError = error.localizedDescription }
+        updates.start()
+        shortcut.onCommand = { [weak self] command in
+            guard let self, !recordingShortcut else { return }
+            capture.perform(command)
+        }
+        for action in CaptureCommand.allCases {
+            do { try shortcut.register(action, binding: preferences.value.binding(for: action)) }
+            catch { shortcutError = "\(action.title): \(error.localizedDescription)" }
+        }
         #if SWIFT_PACKAGE
         let url = Bundle.module.url(forResource: "AnnotationFont", withExtension: "ttf", subdirectory: "Resources")
         #else
@@ -62,13 +83,18 @@ struct FastShotApp: App {
         // Explicit local setup action; normal launches never ask for screen access.
         if ProcessInfo.processInfo.arguments.contains("--request-screen-access") { capture.requestPermission() }
     }
-    func updateShortcut(key: UInt32, modifiers: UInt32, label: String) {
-        guard key != preferences.value.shortcutKey || modifiers != preferences.value.shortcutModifiers else { return }
+    func updateShortcut(_ action: CaptureCommand, binding: ShortcutBinding?) {
+        if let binding, CaptureCommand.allCases.contains(where: {
+            $0 != action && preferences.value.binding(for: $0).map { $0.key == binding.key && $0.modifiers == binding.modifiers } == true
+        }) { shortcutError = "That shortcut is assigned to another FastShot action."; return }
+        if preferences.value.binding(for: action) == binding { return }
         do {
-            try shortcut.register(key: key, modifiers: modifiers)
-            preferences.value.shortcutKey = key; preferences.value.shortcutModifiers = modifiers; preferences.value.shortcutLabel = label; shortcutError = nil
+            try shortcut.register(action, binding: binding)
+            preferences.value.shortcuts[action.rawValue] = binding ?? ShortcutBinding(key: nil)
+            shortcutError = nil
         } catch { shortcutError = error.localizedDescription }
     }
+
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: AppModel?
@@ -96,6 +122,17 @@ struct WindowRegistration: NSViewRepresentable {
 
 // The reference menu-bar template preserves the original capture-and-lightning mark.
 enum Brand {
+    // GitHub's official mark: https://github.githubassets.com/favicons/favicon.svg
+    static let githubImage: NSImage? = {
+        #if SWIFT_PACKAGE
+        let url = Bundle.module.url(forResource: "github-mark", withExtension: "png", subdirectory: "Resources")
+        #else
+        let url = Bundle.main.url(forResource: "github-mark", withExtension: "png")
+            ?? Bundle.main.url(forResource: "github-mark", withExtension: "png", subdirectory: "Resources")
+        #endif
+        return url.flatMap { NSImage(contentsOf: $0) }
+    }()
+
     static var logoImage: NSImage {
         if let image = NSImage(named: "FastShotMark") { return image }
         #if SWIFT_PACKAGE
@@ -105,6 +142,26 @@ enum Brand {
         #endif
         return url.flatMap { NSImage(contentsOf: $0) } ?? NSImage()
     }
+    // Render explicit template frames: MenuBarExtra does not reliably retain view transforms.
+    static func captureMenuBarImage(progress: Double?) -> NSImage {
+        guard let progress else { return menuBarImage }
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                let check = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
+                check?.draw(in: NSRect(x: 2, y: 2, width: 14, height: 14))
+            } else {
+                // One small shutter contraction and release, without changing the menu bar layout.
+                let pulse = sin(progress * .pi)
+                let inset = pulse * 1.5
+                menuBarImage.draw(in: NSRect(x: inset, y: inset, width: 18 - inset * 2, height: 18 - inset * 2),
+                                  from: .zero, operation: .sourceOver, fraction: 1 - pulse * 0.3)
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     static var menuBarImage: NSImage {
         #if SWIFT_PACKAGE
         let url = Bundle.module.url(forResource: "tray-template", withExtension: "png", subdirectory: "Resources")

@@ -1,0 +1,98 @@
+name: Build and release macOS app
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate release configuration
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0' }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use a stable version tag such as v1.0.0'; exit 1; }
+          [[ -n "$SPARKLE_PUBLIC_KEY" ]] || { echo 'Set the SPARKLE_PUBLIC_KEY repository variable. See docs/RELEASING.md.'; exit 1; }
+          echo "APP_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          xcodebuild -version
+          swift --version
+      - name: Run tests
+        run: swift test
+      - name: Build universal app
+        run: |
+          xcodebuild -project FastShot.xcodeproj -scheme FastShot -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath .build-release \
+            -clonedSourcePackagesDirPath .build-release-packages \
+            ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_VERSION" \
+            SPARKLE_PUBLIC_KEY="$SPARKLE_PUBLIC_KEY" \
+            SPARKLE_FEED_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" \
+            build
+      - name: Package app
+        run: |
+          mkdir -p dist
+          app=.build-release/Build/Products/Release/FastShot.app
+          codesign --verify --deep --strict "$app"
+          lipo "$app/Contents/MacOS/FastShot" -verify_arch arm64
+          lipo "$app/Contents/MacOS/FastShot" -verify_arch x86_64
+          ditto -c -k --sequesterRsrc --keepParent "$app" "dist/FastShot-$APP_VERSION-universal.zip"
+      - name: Sign update and generate appcast
+        if: github.ref_type == 'tag'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          [[ -n "$SPARKLE_PRIVATE_KEY" ]] || { echo 'Set the SPARKLE_PRIVATE_KEY repository secret. See docs/RELEASING.md.'; exit 1; }
+          generator=$(find .build-release-packages/artifacts -type f -name generate_appcast -print -quit)
+          [[ -x "$generator" ]] || { echo 'Sparkle generate_appcast tool was not found'; exit 1; }
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$generator" --ed-key-file - \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            dist
+          python3 scripts/validate-appcast.py "dist/appcast.xml" "$APP_VERSION" "$SPARKLE_PUBLIC_KEY"
+      - name: Create checksums
+        run: |
+          cd dist
+          shasum -a 256 ./*.zip > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FastShot-macOS
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FastShot-macOS
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Publish only after the signed archive and feed are both ready.
+          gh release create "$RELEASE_TAG" dist/* --verify-tag \
+            --title "FastShot ${RELEASE_TAG#v}" --generate-notes \
+            --notes 'Download the universal ZIP, extract FastShot.app, and move it to Applications. Requires macOS 14+. In-app updates are signed with Sparkle. This build is ad hoc signed and is not Apple notarized; on first launch you may need System Settings → Privacy & Security → Open Anyway.'
